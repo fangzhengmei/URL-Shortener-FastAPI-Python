@@ -10,6 +10,7 @@ from starlette.datastructures import URL
 from . import crud, models, schemas
 from .database import SessionLocal, engine
 from .config import get_settings
+from .constants import MIN_DAYS, MAX_DAYS, DEFAULT_DAYS
 
 app = FastAPI()
 models.Base.metadata.create_all(bind=engine)
@@ -112,7 +113,12 @@ def get_url_info(
 def get_url_analytics(
         secret_key: str,
         request: Request,
-        days: int = Query(default=30, ge=1, le=365, description="Number of days to analyze"),
+        days: int = Query(
+            default=DEFAULT_DAYS,
+            ge=MIN_DAYS,
+            le=MAX_DAYS,
+            description=f"Number of days to analyze (range: {MIN_DAYS}-{MAX_DAYS})"
+        ),
         db: Session = Depends(get_db)
 ):
     if db_url := crud.get_db_url_by_secret_key(db, secret_key=secret_key):
@@ -134,7 +140,12 @@ def get_url_analytics(
 def get_daily_analytics(
         secret_key: str,
         request: Request,
-        days: int = Query(default=30, ge=1, le=365, description="Number of days to analyze"),
+        days: int = Query(
+            default=DEFAULT_DAYS,
+            ge=MIN_DAYS,
+            le=MAX_DAYS,
+            description=f"Number of days to analyze (range: {MIN_DAYS}-{MAX_DAYS})"
+        ),
         db: Session = Depends(get_db)
 ):
     if db_url := crud.get_db_url_by_secret_key(db, secret_key=secret_key):

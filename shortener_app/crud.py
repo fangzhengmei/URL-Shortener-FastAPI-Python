@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
 from . import keygen, models, schemas
+from .constants import MIN_DAYS, MAX_DAYS, DEFAULT_DAYS
 
 
 def create_db_url(db: Session, url: schemas.URLBase) -> models.URL:
@@ -198,8 +199,9 @@ def deactivate_db_url_by_secret_key(
 def get_daily_clicks(
     db: Session,
     url_id: int,
-    days: int = 30
+    days: int = DEFAULT_DAYS
 ) -> List[Dict]:
+    days = max(MIN_DAYS, min(MAX_DAYS, int(days)))
     end_date = datetime.utcnow()
     start_date = end_date - timedelta(days=days)
     
@@ -358,7 +360,7 @@ def get_country_stats(db: Session, url_id: int) -> Dict:
     return stats
 
 
-def get_click_analytics(db: Session, url_id: int, days: int = 30) -> Dict:
+def get_click_analytics(db: Session, url_id: int, days: int = DEFAULT_DAYS) -> Dict:
     return {
         "total_clicks": db.query(models.ClickLog).filter(models.ClickLog.url_id == url_id).count(),
         "daily_clicks": get_daily_clicks(db, url_id, days),
