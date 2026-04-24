@@ -1,10 +1,12 @@
 # tests/test_analytics.py
 # Test cases for analytics functionality
 
+import json
 import sys
 import os
 from datetime import datetime, timedelta
 from typing import Generator
+from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shortener_app import models, crud, schemas
 from shortener_app.constants import MIN_DAYS, MAX_DAYS, DEFAULT_DAYS
 from shortener_app.database import Base
+from shortener_app.geolocator import IPGeolocator, get_geolocator, get_geolocation
 from shortener_app.main import app, get_db
 
 
@@ -361,3 +364,179 @@ class TestRefererTracking:
         data = response.json()
         
         assert data["referer_stats"] == []
+
+
+class TestIPGeolocation:
+    def test_private_ip_detection_localhost(self):
+        geolocator = IPGeolocator()
+        assert geolocator._is_private_ip("127.0.0.1") == True
+        assert geolocator._is_private_ip("::1") == True
+        assert geolocator._is_private_ip("localhost") == True
+
+    def test_private_ip_detection_10_range(self):
+        geolocator = IPGeolocator()
+        assert geolocator._is_private_ip("10.0.0.1") == True
+        assert geolocator._is_private_ip("10.255.255.255") == True
+
+    def test_private_ip_detection_172_range(self):
+        geolocator = IPGeolocator()
+        assert geolocator._is_private_ip("172.16.0.1") == True
+        assert geolocator._is_private_ip("172.31.255.255") == True
+        assert geolocator._is_private_ip("172.15.255.255") == False
+        assert geolocator._is_private_ip("172.32.0.1") == False
+
+    def test_private_ip_detection_192_168_range(self):
+        geolocator = IPGeolocator()
+        assert geolocator._is_private_ip("192.168.0.1") == True
+        assert geolocator._is_private_ip("192.168.255.255") == True
+        assert geolocator._is_private_ip("192.167.255.255") == False
+
+    def test_public_ip_not_private(self):
+        geolocator = IPGeolocator()
+        assert geolocator._is_private_ip("8.8.8.8") == False
+        assert geolocator._is_private_ip("1.1.1.1") == False
+
+    def test_empty_ip_returns_none(self):
+        result = get_geolocation("")
+        assert result == (None, None, None)
+
+    def test_none_ip_returns_none(self):
+        result = get_geolocation(None)
+        assert result == (None, None, None)
+
+
+class TestGeolocationIntegration:
+    def create_test_url(self, client: TestClient) -> dict:
+        response = client.post("/url", json={"target_url": "https://example.com"})
+        assert response.status_code == 200
+        return response.json()
+
+    @patch('shortener_app.geolocator.urlopen')
+    def test_geolocation_api_mocked_success(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "status": "success",
+            "country": "United States",
+            "countryCode": "US",
+            "region": "CA",
+            "regionName": "California",
+            "city": "San Francisco"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        geolocator = IPGeolocator()
+        country, region, city = geolocator.lookup("8.8.8.8")
+        
+        assert country == "United States"
+        assert region == "California"
+        assert city == "San Francisco"
+
+    @patch('shortener_app.geolocator.urlopen')
+    def test_geolocation_api_mocked_failure(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "status": "fail",
+            "message": "invalid query"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        geolocator = IPGeolocator()
+        country, region, city = geolocator.lookup("invalid")
+        
+        assert country is None
+        assert region is None
+        assert city is None
+
+    def test_geolocation_caching(self):
+        geolocator = IPGeolocator(max_cache_size=10)
+        
+        with patch.object(geolocator, '_lookup_ip') as mock_lookup:
+            mock_lookup.return_value = {
+                'country': 'Test Country',
+                'region': 'Test Region',
+                'city': 'Test City'
+            }
+            
+            geolocator.lookup("8.8.8.8")
+            geolocator.lookup("8.8.8.8")
+            geolocator.lookup("8.8.8.8")
+            
+            assert mock_lookup.call_count == 1
+            
+            cache_info = geolocator.cache_info()
+            assert cache_info.hits == 2
+            assert cache_info.misses == 1
+
+    def test_geolocation_cache_clear(self):
+        geolocator = IPGeolocator(max_cache_size=10)
+        
+        with patch.object(geolocator, '_lookup_ip') as mock_lookup:
+            mock_lookup.return_value = {
+                'country': 'Test Country',
+                'region': 'Test Region',
+                'city': 'Test City'
+            }
+            
+            geolocator.lookup("8.8.8.8")
+            geolocator.clear_cache()
+            
+            cache_info = geolocator.cache_info()
+            assert cache_info.currsize == 0
+
+    @patch('shortener_app.crud.get_geolocation')
+    def test_click_log_with_geolocation(self, mock_get_geo, db_session: Session):
+        mock_get_geo.return_value = ("United States", "California", "San Francisco")
+        
+        test_url = models.URL(
+            key="test123",
+            secret_key="test123_secret",
+            target_url="https://example.com"
+        )
+        db_session.add(test_url)
+        db_session.commit()
+        db_session.refresh(test_url)
+        
+        click_log = crud.create_click_log(
+            db=db_session,
+            url_id=test_url.id,
+            ip_address="8.8.8.8",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+        )
+        
+        assert click_log.country == "United States"
+        assert click_log.region == "California"
+        assert click_log.city == "San Francisco"
+        mock_get_geo.assert_called_once_with("8.8.8.8")
+
+    @patch('shortener_app.crud.get_geolocation')
+    def test_country_stats_aggregation(self, mock_get_geo, client: TestClient, db_session: Session):
+        mock_get_geo.side_effect = [
+            ("United States", "California", "San Francisco"),
+            ("United States", "New York", "New York City"),
+            ("United Kingdom", "England", "London"),
+            ("Canada", "Ontario", "Toronto"),
+            ("United States", "California", "Los Angeles"),
+        ]
+        
+        url_info = self.create_test_url(client)
+        url_key = url_info["url"].split("/")[-1]
+        secret_key = url_info["admin_url"].split("/")[-1]
+        
+        for _ in range(5):
+            client.get(f"/{url_key}", headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+            })
+        
+        response = client.get(f"/admin/{secret_key}/analytics/countries")
+        data = response.json()
+        stats = data["country_stats"]
+        
+        assert "United States" in stats
+        assert stats["United States"]["count"] == 3
+        assert "United Kingdom" in stats
+        assert stats["United Kingdom"]["count"] == 1
+        assert "Canada" in stats
+        assert stats["Canada"]["count"] == 1
+        
+        total = sum(s["count"] for s in stats.values())
+        assert total == 5

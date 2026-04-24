@@ -7,6 +7,7 @@ from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
 from . import keygen, models, schemas
 from .constants import MIN_DAYS, MAX_DAYS, DEFAULT_DAYS
+from .geolocator import get_geolocation
 
 
 def create_db_url(db: Session, url: schemas.URLBase) -> models.URL:
@@ -148,11 +149,16 @@ def create_click_log(
     referer: Optional[str] = None
 ) -> models.ClickLog:
     parsed_ua = parse_user_agent(user_agent)
+    country, region, city = get_geolocation(ip_address) if ip_address else (None, None, None)
+    
     click_log = models.ClickLog(
         url_id=url_id,
         ip_address=ip_address,
         user_agent=user_agent,
         referer=referer,
+        country=country,
+        region=region,
+        city=city,
         device_type=parsed_ua["device_type"],
         browser=parsed_ua["browser"],
         browser_version=parsed_ua["browser_version"],
