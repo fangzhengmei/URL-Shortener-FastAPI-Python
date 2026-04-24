@@ -156,3 +156,10 @@ class AuditLog(BaseModel):
 class AuditLogList(BaseModel):
     total: int
     logs: List[AuditLog]
+
+
+class CleanupResult(BaseModel):
+    audit_logs_removed: int
+    revoked_tokens_removed: int
+    audit_cutoff_date: datetime
+    token_cutoff_date: datetime

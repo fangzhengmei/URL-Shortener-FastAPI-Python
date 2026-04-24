@@ -92,3 +92,4 @@ class AuditEventType:
     USER_DELETED = "user_deleted"
     
     TOKEN_REVOKED = "token_revoked"
+    LOGS_CLEANUP = "logs_cleanup"

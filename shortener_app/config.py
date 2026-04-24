@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     max_login_attempts: int = 5
     account_lockout_minutes: int = 15
     failed_login_reset_minutes: int = 30
+    
+    audit_log_retention_days: int = 90
+    revoked_token_retention_days: int = 7
 
     class Config:
         env_file = ".env"
@@ -39,4 +42,6 @@ def get_settings() -> Settings:
     print(f"  - Min password length: {settings.min_password_length}")
     print(f"  - Max login attempts: {settings.max_login_attempts}")
     print(f"  - Account lockout: {settings.account_lockout_minutes} minutes")
+    print(f"  - Audit log retention: {settings.audit_log_retention_days} days")
+    print(f"  - Revoked token retention: {settings.revoked_token_retention_days} days")
     return settings

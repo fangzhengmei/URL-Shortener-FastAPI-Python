@@ -1,13 +1,15 @@
 # main.py
 # FastAPI Implementation
 
-from datetime import datetime
+import csv
+from datetime import datetime, timedelta
+from io import StringIO
 from pathlib import Path
 from typing import List, Optional
 
 import validators
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError
 from sqlalchemy.orm import Session
@@ -612,19 +614,14 @@ def admin_reset_password(
     return user
 
 
-@app.get("/admin/logs", response_model=schemas.AuditLogList)
-def get_audit_logs(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
-    user_id: Optional[int] = Query(None, description="Filter by user ID"),
-    event_type: Optional[str] = Query(None, description="Filter by event type"),
-    success: Optional[bool] = Query(None, description="Filter by success status"),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+def build_audit_log_query(
+    db: Session,
+    user_id: Optional[int] = None,
+    event_type: Optional[str] = None,
+    success: Optional[bool] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
 ):
-    if not current_user.is_admin:
-        raise_forbidden("Admin access required")
-    
     query = db.query(models.AuditLog)
     
     if user_id is not None:
@@ -633,9 +630,212 @@ def get_audit_logs(
         query = query.filter(models.AuditLog.event_type == event_type)
     if success is not None:
         query = query.filter(models.AuditLog.success == success)
+    if start_time is not None:
+        query = query.filter(models.AuditLog.timestamp >= start_time)
+    if end_time is not None:
+        query = query.filter(models.AuditLog.timestamp <= end_time)
+    
+    return query
+
+
+@app.get("/admin/logs", response_model=schemas.AuditLogList)
+def get_audit_logs(
+    skip: int = Query(0, ge=0, description="Number of logs to skip"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of logs to return"),
+    user_id: Optional[int] = Query(None, description="Filter by user ID"),
+    event_type: Optional[str] = Query(None, description="Filter by event type"),
+    success: Optional[bool] = Query(None, description="Filter by success status"),
+    start_time: Optional[datetime] = Query(
+        None, 
+        description="Start time in ISO format (e.g., 2026-04-20T00:00:00)"
+    ),
+    end_time: Optional[datetime] = Query(
+        None,
+        description="End time in ISO format (e.g., 2026-04-27T23:59:59)"
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    query = build_audit_log_query(
+        db=db,
+        user_id=user_id,
+        event_type=event_type,
+        success=success,
+        start_time=start_time,
+        end_time=end_time
+    )
     
     total = query.count()
     
     logs = query.order_by(models.AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
     
     return schemas.AuditLogList(total=total, logs=logs)
+
+
+@app.post("/admin/logs/cleanup", response_model=schemas.CleanupResult)
+def cleanup_expired_logs(
+    request: Request,
+    older_than_days: Optional[int] = Query(
+        None, 
+        ge=1, 
+        description="Remove logs older than N days (uses config if not provided)"
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    settings = get_settings()
+    
+    audit_days = older_than_days if older_than_days is not None else settings.audit_log_retention_days
+    token_days = older_than_days if older_than_days is not None else settings.revoked_token_retention_days
+    
+    audit_cutoff = datetime.utcnow() - timedelta(days=audit_days)
+    token_cutoff = datetime.utcnow() - timedelta(days=token_days)
+    
+    audit_count = db.query(models.AuditLog).filter(
+        models.AuditLog.timestamp < audit_cutoff
+    ).count()
+    
+    token_count = db.query(models.RevokedToken).filter(
+        models.RevokedToken.revoked_at < token_cutoff
+    ).count()
+    
+    db.query(models.AuditLog).filter(
+        models.AuditLog.timestamp < audit_cutoff
+    ).delete(synchronize_session=False)
+    
+    db.query(models.RevokedToken).filter(
+        models.RevokedToken.revoked_at < token_cutoff
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=models.AuditEventType.LOGS_CLEANUP,
+        user=current_user,
+        request=request,
+        success=True,
+        description=f"Cleaned up {audit_count} audit logs and {token_count} revoked tokens older than {audit_days} days"
+    )
+    
+    return schemas.CleanupResult(
+        audit_logs_removed=audit_count,
+        revoked_tokens_removed=token_count,
+        audit_cutoff_date=audit_cutoff,
+        token_cutoff_date=token_cutoff
+    )
+
+
+@app.get("/admin/logs/export/csv")
+def export_logs_csv(
+    user_id: Optional[int] = Query(None, description="Filter by user ID"),
+    event_type: Optional[str] = Query(None, description="Filter by event type"),
+    success: Optional[bool] = Query(None, description="Filter by success status"),
+    start_time: Optional[datetime] = Query(
+        None,
+        description="Start time in ISO format (e.g., 2026-04-20T00:00:00)"
+    ),
+    end_time: Optional[datetime] = Query(
+        None,
+        description="End time in ISO format (e.g., 2026-04-27T23:59:59)"
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    query = build_audit_log_query(
+        db=db,
+        user_id=user_id,
+        event_type=event_type,
+        success=success,
+        start_time=start_time,
+        end_time=end_time
+    )
+    
+    logs = query.order_by(models.AuditLog.timestamp.asc()).all()
+    
+    output = StringIO()
+    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+    
+    headers = [
+        "ID",
+        "Timestamp",
+        "User ID",
+        "Username",
+        "Event Type",
+        "Description",
+        "IP Address",
+        "User Agent",
+        "Success",
+        "Error Message"
+    ]
+    writer.writerow(headers)
+    
+    for log in logs:
+        row = [
+            log.id,
+            log.timestamp.strftime("%Y-%m-%d %H:%M:%S") if log.timestamp else "",
+            log.user_id if log.user_id else "",
+            log.username if log.username else "",
+            log.event_type,
+            log.event_description if log.event_description else "",
+            log.ip_address if log.ip_address else "",
+            log.user_agent if log.user_agent else "",
+            "Yes" if log.success else "No",
+            log.error_message if log.error_message else ""
+        ]
+        writer.writerow(row)
+    
+    output.seek(0)
+    
+    filename = f"audit_logs_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Type": "text/csv; charset=utf-8"
+        }
+    )
+
+
+@app.get("/admin/logs/export/json", response_model=List[schemas.AuditLog])
+def export_logs_json(
+    user_id: Optional[int] = Query(None, description="Filter by user ID"),
+    event_type: Optional[str] = Query(None, description="Filter by event type"),
+    success: Optional[bool] = Query(None, description="Filter by success status"),
+    start_time: Optional[datetime] = Query(
+        None,
+        description="Start time in ISO format (e.g., 2026-04-20T00:00:00)"
+    ),
+    end_time: Optional[datetime] = Query(
+        None,
+        description="End time in ISO format (e.g., 2026-04-27T23:59:59)"
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    query = build_audit_log_query(
+        db=db,
+        user_id=user_id,
+        event_type=event_type,
+        success=success,
+        start_time=start_time,
+        end_time=end_time
+    )
+    
+    logs = query.order_by(models.AuditLog.timestamp.asc()).all()
+    
+    return logs
