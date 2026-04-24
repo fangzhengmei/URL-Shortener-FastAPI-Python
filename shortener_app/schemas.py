@@ -51,6 +51,9 @@ class User(UserBase):
     is_admin: bool
     created_at: datetime
     last_login: Optional[datetime] = None
+    last_password_change: Optional[datetime] = None
+    failed_login_attempts: int = 0
+    locked_until: Optional[datetime] = None
 
     class Config:
         orm_mode = True
@@ -121,6 +124,7 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: Optional[str] = None
+    jti: Optional[str] = None
 
 
 class AuthSettings(BaseModel):
@@ -131,3 +135,24 @@ class AuthSettings(BaseModel):
 
 class LogoutResponse(BaseModel):
     detail: str = "Logged out successfully"
+
+
+class AuditLog(BaseModel):
+    id: int
+    timestamp: datetime
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    event_type: str
+    event_description: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    success: bool
+    error_message: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class AuditLogList(BaseModel):
+    total: int
+    logs: List[AuditLog]

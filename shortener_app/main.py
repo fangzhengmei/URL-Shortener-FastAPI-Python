@@ -3,10 +3,10 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import validators
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError
@@ -138,7 +138,11 @@ def get_auth_settings():
 
 
 @app.post("/auth/register", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
-def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def register_user(
+    user: schemas.UserCreate, 
+    request: Request,
+    db: Session = Depends(get_db)
+):
     settings = get_settings()
     
     check_registration_allowed(user, settings)
@@ -158,19 +162,40 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
                 detail="Email already registered"
             )
     
-    return auth.create_user(db=db, user=user)
+    new_user = auth.create_user(db=db, user=user)
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=models.AuditEventType.USER_CREATED,
+        user=new_user,
+        request=request,
+        success=True,
+        description="User registered via public registration"
+    )
+    
+    return new_user
 
 
 @app.post("/auth/login", response_model=schemas.Token)
 def login_for_access_token(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     settings = get_settings()
+    username = form_data.username
     
-    user = auth.get_user(db, username=form_data.username)
+    user = auth.get_user(db, username=username)
     
     if not user:
+        auth.log_audit_event(
+            db=db,
+            event_type=models.AuditEventType.LOGIN_FAILED,
+            request=request,
+            success=False,
+            description=f"Login attempt for non-existent user: {username}",
+            username=username
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -179,17 +204,33 @@ def login_for_access_token(
     
     if user.is_active and auth.is_account_locked(user):
         remaining = auth.get_lockout_remaining_minutes(user)
+        auth.log_audit_event(
+            db=db,
+            event_type=models.AuditEventType.LOGIN_FAILED,
+            user=user,
+            request=request,
+            success=False,
+            description=f"Login attempt on locked account. {remaining} minutes remaining."
+        )
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
             detail=f"Account is locked. Try again in {remaining} minutes.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    if not auth.authenticate_user(db, username=form_data.username, password=form_data.password):
+    if not auth.authenticate_user(db, username=username, password=form_data.password):
         if user.is_active:
             user = auth.record_failed_login(db, user)
             
             if auth.is_account_locked(user):
+                auth.log_audit_event(
+                    db=db,
+                    event_type=models.AuditEventType.ACCOUNT_LOCKED,
+                    user=user,
+                    request=request,
+                    success=True,
+                    description=f"Account locked after {settings.max_login_attempts} failed login attempts"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_423_LOCKED,
                     detail=f"Too many failed attempts. Account is locked for {settings.account_lockout_minutes} minutes.",
@@ -197,6 +238,14 @@ def login_for_access_token(
                 )
         
         remaining_attempts = settings.max_login_attempts - user.failed_login_attempts
+        auth.log_audit_event(
+            db=db,
+            event_type=models.AuditEventType.LOGIN_FAILED,
+            user=user,
+            request=request,
+            success=False,
+            description=f"Failed login attempt. Remaining attempts: {remaining_attempts}"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Incorrect username or password. {remaining_attempts} attempts remaining.",
@@ -204,6 +253,14 @@ def login_for_access_token(
         )
     
     if not user.is_active:
+        auth.log_audit_event(
+            db=db,
+            event_type=models.AuditEventType.LOGIN_FAILED,
+            user=user,
+            request=request,
+            success=False,
+            description="Login attempt on disabled account"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account has been disabled",
@@ -214,6 +271,15 @@ def login_for_access_token(
     user.last_login = datetime.utcnow()
     db.commit()
     db.refresh(user)
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=models.AuditEventType.LOGIN_SUCCESS,
+        user=user,
+        request=request,
+        success=True,
+        description="Successful login"
+    )
     
     access_token, jti, expires_at = auth.create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
@@ -243,9 +309,17 @@ def logout(
                 expires_at=expires_at,
                 user_id=current_user.id
             )
-    
     except (JWTError, HTTPException):
         pass
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=models.AuditEventType.LOGOUT,
+        user=current_user,
+        request=request,
+        success=True,
+        description="User logged out"
+    )
     
     return schemas.LogoutResponse()
 
@@ -260,6 +334,7 @@ def read_users_me(
 @app.put("/auth/me", response_model=schemas.User)
 def update_user_me(
     user_update: schemas.UserUpdate,
+    request: Request,
     current_user: models.User = Depends(auth.get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -274,9 +349,18 @@ def update_user_me(
     
     if user_update.password:
         current_user = auth.update_user_password(db, current_user, user_update.password)
+        auth.log_audit_event(
+            db=db,
+            event_type=models.AuditEventType.PASSWORD_CHANGED,
+            user=current_user,
+            request=request,
+            success=True,
+            description="User changed their own password"
+        )
+    else:
+        db.commit()
+        db.refresh(current_user)
     
-    db.commit()
-    db.refresh(current_user)
     return current_user
 
 
@@ -358,6 +442,7 @@ def get_user_urls(
 @app.post("/admin/users", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
 def admin_create_user(
     user_data: schemas.AdminUserCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
@@ -387,12 +472,22 @@ def admin_create_user(
         is_active=True,
         is_admin=user_data.is_admin,
         created_at=datetime.utcnow(),
-        failed_login_attempts=0
+        failed_login_attempts=0,
+        last_password_change=datetime.utcnow()
     )
     
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=models.AuditEventType.USER_CREATED,
+        user=db_user,
+        request=request,
+        success=True,
+        description=f"User created by admin {current_user.username}"
+    )
     
     return db_user
 
@@ -413,6 +508,7 @@ def get_all_users(
 @app.put("/admin/users/{user_id}/toggle-active", response_model=schemas.User)
 def toggle_user_active(
     user_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
@@ -422,6 +518,8 @@ def toggle_user_active(
     user = auth.get_user_by_id(db, user_id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    was_active = user.is_active
     
     if user.is_admin and user.id != current_user.id:
         user.is_active = not user.is_active
@@ -432,12 +530,26 @@ def toggle_user_active(
     
     db.commit()
     db.refresh(user)
+    
+    event_type = models.AuditEventType.ACCOUNT_ENABLED if user.is_active else models.AuditEventType.ACCOUNT_DISABLED
+    action = "enabled" if user.is_active else "disabled"
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=event_type,
+        user=user,
+        request=request,
+        success=True,
+        description=f"Account {action} by admin {current_user.username}"
+    )
+    
     return user
 
 
 @app.put("/admin/users/{user_id}/unlock", response_model=schemas.User)
 def admin_unlock_user(
     user_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
@@ -448,7 +560,19 @@ def admin_unlock_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    was_locked = auth.is_account_locked(user)
     user = auth.reset_failed_login_attempts(db, user)
+    
+    if was_locked:
+        auth.log_audit_event(
+            db=db,
+            event_type=models.AuditEventType.ACCOUNT_UNLOCKED,
+            user=user,
+            request=request,
+            success=True,
+            description=f"Account unlocked by admin {current_user.username}"
+        )
+    
     return user
 
 
@@ -456,6 +580,7 @@ def admin_unlock_user(
 def admin_reset_password(
     user_id: int,
     new_password: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
@@ -474,4 +599,43 @@ def admin_reset_password(
         )
     
     user = auth.update_user_password(db, user, new_password)
+    
+    auth.log_audit_event(
+        db=db,
+        event_type=models.AuditEventType.PASSWORD_RESET,
+        user=user,
+        request=request,
+        success=True,
+        description=f"Password reset by admin {current_user.username}"
+    )
+    
     return user
+
+
+@app.get("/admin/logs", response_model=schemas.AuditLogList)
+def get_audit_logs(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    user_id: Optional[int] = Query(None, description="Filter by user ID"),
+    event_type: Optional[str] = Query(None, description="Filter by event type"),
+    success: Optional[bool] = Query(None, description="Filter by success status"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    query = db.query(models.AuditLog)
+    
+    if user_id is not None:
+        query = query.filter(models.AuditLog.user_id == user_id)
+    if event_type is not None:
+        query = query.filter(models.AuditLog.event_type == event_type)
+    if success is not None:
+        query = query.filter(models.AuditLog.success == success)
+    
+    total = query.count()
+    
+    logs = query.order_by(models.AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
+    
+    return schemas.AuditLogList(total=total, logs=logs)
