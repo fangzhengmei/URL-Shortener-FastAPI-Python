@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     allow_public_registration: bool = False
     invite_code: Optional[str] = None
     min_password_length: int = 6
+    
+    max_login_attempts: int = 5
+    account_lockout_minutes: int = 15
+    failed_login_reset_minutes: int = 30
 
     class Config:
         env_file = ".env"
@@ -33,4 +37,6 @@ def get_settings() -> Settings:
     if settings.invite_code:
         print(f"  - Invite code required: Yes")
     print(f"  - Min password length: {settings.min_password_length}")
+    print(f"  - Max login attempts: {settings.max_login_attempts}")
+    print(f"  - Account lockout: {settings.account_lockout_minutes} minutes")
     return settings

@@ -8,7 +8,8 @@ from typing import List
 import validators
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError
 from sqlalchemy.orm import Session
 from starlette.datastructures import URL
 
@@ -21,6 +22,8 @@ models.Base.metadata.create_all(bind=engine)
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 def get_db():
@@ -85,6 +88,24 @@ def check_registration_allowed(user: schemas.UserCreate, settings):
             raise_forbidden("Registration is disabled. Please contact the administrator.")
 
 
+def get_token_from_request(request: Request) -> str:
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication scheme",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token.strip()
+
+
 @app.get("/")
 def read_root():
     return RedirectResponse(url="/login")
@@ -120,7 +141,7 @@ def get_auth_settings():
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     settings = get_settings()
     
-    check_registration_allowed(user, settings, db)
+    check_registration_allowed(user, settings)
     
     existing_user = auth.get_user(db, username=user.username)
     if existing_user:
@@ -145,7 +166,10 @@ def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    user = auth.authenticate_user(db, username=form_data.username, password=form_data.password)
+    settings = get_settings()
+    
+    user = auth.get_user(db, username=form_data.username)
+    
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -153,18 +177,76 @@ def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    if user.is_active and auth.is_account_locked(user):
+        remaining = auth.get_lockout_remaining_minutes(user)
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"Account is locked. Try again in {remaining} minutes.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not auth.authenticate_user(db, username=form_data.username, password=form_data.password):
+        if user.is_active:
+            user = auth.record_failed_login(db, user)
+            
+            if auth.is_account_locked(user):
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail=f"Too many failed attempts. Account is locked for {settings.account_lockout_minutes} minutes.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        
+        remaining_attempts = settings.max_login_attempts - user.failed_login_attempts
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Incorrect username or password. {remaining_attempts} attempts remaining.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account has been disabled",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user = auth.reset_failed_login_attempts(db, user)
     user.last_login = datetime.utcnow()
     db.commit()
     db.refresh(user)
     
-    access_token = auth.create_access_token(data={"sub": user.username})
+    access_token, jti, expires_at = auth.create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.post("/auth/logout", response_model=schemas.LogoutResponse)
 def logout(
-    current_user: models.User = Depends(auth.get_current_active_user)
+    request: Request,
+    current_user: models.User = Depends(auth.get_current_active_user),
+    db: Session = Depends(get_db)
 ):
+    try:
+        token = get_token_from_request(request)
+        payload = auth.decode_token(token)
+        jti = payload.get("jti")
+        exp_timestamp = payload.get("exp")
+        
+        expires_at = None
+        if exp_timestamp:
+            expires_at = datetime.utcfromtimestamp(exp_timestamp)
+        
+        if jti:
+            auth.revoke_token(
+                db=db,
+                jti=jti,
+                token=token,
+                expires_at=expires_at,
+                user_id=current_user.id
+            )
+    
+    except (JWTError, HTTPException):
+        pass
+    
     return schemas.LogoutResponse()
 
 
@@ -304,7 +386,8 @@ def admin_create_user(
         hashed_password=hashed_password,
         is_active=True,
         is_admin=user_data.is_admin,
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
+        failed_login_attempts=0
     )
     
     db.add(db_user)
@@ -349,6 +432,23 @@ def toggle_user_active(
     
     db.commit()
     db.refresh(user)
+    return user
+
+
+@app.put("/admin/users/{user_id}/unlock", response_model=schemas.User)
+def admin_unlock_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    user = auth.get_user_by_id(db, user_id=user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user = auth.reset_failed_login_attempts(db, user)
     return user
 
 
