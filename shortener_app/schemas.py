@@ -4,16 +4,40 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
+
+from .config import get_settings
 
 
 class UserBase(BaseModel):
     username: str
     email: Optional[str] = None
 
+    @validator('username')
+    def validate_username(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Username cannot be empty')
+        if len(v) < 2:
+            raise ValueError('Username must be at least 2 characters')
+        if len(v) > 50:
+            raise ValueError('Username must be less than 50 characters')
+        return v.strip()
+
 
 class UserCreate(UserBase):
     password: str
+    invite_code: Optional[str] = None
+
+    @validator('password')
+    def validate_password(cls, v):
+        settings = get_settings()
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Password cannot be empty')
+        if len(v) < settings.min_password_length:
+            raise ValueError(f'Password must be at least {settings.min_password_length} characters')
+        if len(v) > 128:
+            raise ValueError('Password must be less than 128 characters')
+        return v
 
 
 class UserLogin(BaseModel):
@@ -35,6 +59,33 @@ class User(UserBase):
 class UserUpdate(BaseModel):
     email: Optional[str] = None
     password: Optional[str] = None
+
+    @validator('password')
+    def validate_password(cls, v):
+        if v is None:
+            return v
+        settings = get_settings()
+        if len(v) < settings.min_password_length:
+            raise ValueError(f'Password must be at least {settings.min_password_length} characters')
+        if len(v) > 128:
+            raise ValueError('Password must be less than 128 characters')
+        return v
+
+
+class AdminUserCreate(UserBase):
+    password: str
+    is_admin: bool = False
+
+    @validator('password')
+    def validate_password(cls, v):
+        settings = get_settings()
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Password cannot be empty')
+        if len(v) < settings.min_password_length:
+            raise ValueError(f'Password must be at least {settings.min_password_length} characters')
+        if len(v) > 128:
+            raise ValueError('Password must be less than 128 characters')
+        return v
 
 
 class URLBase(BaseModel):
@@ -70,3 +121,13 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: Optional[str] = None
+
+
+class AuthSettings(BaseModel):
+    allow_public_registration: bool
+    invite_code_required: bool
+    min_password_length: int
+
+
+class LogoutResponse(BaseModel):
+    detail: str = "Logged out successfully"

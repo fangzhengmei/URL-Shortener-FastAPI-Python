@@ -149,7 +149,19 @@
         }
         
         .hidden {
-            display: none;
+            display: none !important;
+        }
+        
+        .hint {
+            font-size: 12px;
+            color: #999;
+            margin-top: 4px;
+        }
+        
+        .hint.warning {
+            color: #d97706;
+            margin-bottom: 16px;
+            text-align: center;
         }
     </style>
 </head>
@@ -158,6 +170,10 @@
         <div class="header">
             <h1>🔗 URL Shortener</h1>
             <p>短链服务管理系统</p>
+        </div>
+        
+        <div id="registrationDisabled" class="hint warning hidden">
+            ⚠️ 注册功能已关闭，请联系管理员获取账号
         </div>
         
         <div id="error" class="error hidden"></div>
@@ -173,28 +189,34 @@
                 <input type="password" id="loginPassword" placeholder="请输入密码" required>
             </div>
             <button type="submit" class="btn btn-primary">登录</button>
-            <div class="divider">
+            <div id="loginDivider" class="divider">
                 <span>没有账号？</span>
             </div>
-            <button type="button" class="btn btn-secondary" onclick="showRegister()">注册新账号</button>
+            <button id="registerBtn" type="button" class="btn btn-secondary" onclick="showRegister()">注册新账号</button>
         </form>
         
         <form id="registerForm" class="hidden">
             <div class="form-group">
                 <label for="regUsername">用户名 *</label>
-                <input type="text" id="regUsername" placeholder="请输入用户名" required>
+                <input type="text" id="regUsername" placeholder="请输入用户名（2-50字符）" required>
             </div>
             <div class="form-group">
                 <label for="regEmail">邮箱（可选）</label>
                 <input type="email" id="regEmail" placeholder="请输入邮箱">
             </div>
-            <div class="form-group">
-                <label for="regPassword">密码</label>
-                <input type="password" id="regPassword" placeholder="请输入密码" required>
+            <div id="inviteCodeGroup" class="form-group hidden">
+                <label for="regInviteCode">邀请码 *</label>
+                <input type="text" id="regInviteCode" placeholder="请输入邀请码">
+                <div class="hint">邀请码由管理员提供</div>
             </div>
             <div class="form-group">
-                <label for="regConfirmPassword">确认密码</label>
-                <input type="password" id="regConfirmPassword" placeholder="请确认密码" required>
+                <label for="regPassword">密码 *</label>
+                <input type="password" id="regPassword" placeholder="请输入密码" required>
+                <div id="passwordHint" class="hint">密码至少 6 位</div>
+            </div>
+            <div class="form-group">
+                <label for="regConfirmPassword">确认密码 *</label>
+                <input type="password" id="regConfirmPassword" placeholder="请再次输入密码" required>
             </div>
             <button type="submit" class="btn btn-primary">注册</button>
             <div class="divider">
@@ -206,6 +228,36 @@
     
     <script>
         const API_BASE = '';
+        let authSettings = null;
+        
+        async function loadAuthSettings() {
+            try {
+                const response = await fetch(`${API_BASE}/auth/settings`);
+                if (response.ok) {
+                    authSettings = await response.json();
+                    updateUIWithSettings();
+                }
+            } catch (error) {
+                console.error('Failed to load auth settings:', error);
+            }
+        }
+        
+        function updateUIWithSettings() {
+            if (!authSettings) return;
+            
+            const minLength = authSettings.min_password_length || 6;
+            document.getElementById('passwordHint').textContent = `密码至少 ${minLength} 位`;
+            
+            if (authSettings.invite_code_required) {
+                document.getElementById('inviteCodeGroup').classList.remove('hidden');
+            }
+            
+            if (!authSettings.allow_public_registration && !authSettings.invite_code_required) {
+                document.getElementById('registrationDisabled').classList.remove('hidden');
+                document.getElementById('loginDivider').classList.add('hidden');
+                document.getElementById('registerBtn').classList.add('hidden');
+            }
+        }
         
         function showError(message) {
             const errorEl = document.getElementById('error');
@@ -280,14 +332,21 @@
             const email = document.getElementById('regEmail').value;
             const password = document.getElementById('regPassword').value;
             const confirmPassword = document.getElementById('regConfirmPassword').value;
+            const inviteCode = document.getElementById('regInviteCode').value;
+            
+            if (!username || username.length < 2) {
+                showError('用户名至少 2 个字符');
+                return;
+            }
             
             if (password !== confirmPassword) {
                 showError('两次输入的密码不一致');
                 return;
             }
             
-            if (password.length < 6) {
-                showError('密码长度至少6位');
+            const minLength = authSettings?.min_password_length || 6;
+            if (password.length < minLength) {
+                showError(`密码长度至少 ${minLength} 位`);
                 return;
             }
             
@@ -299,6 +358,10 @@
                 
                 if (email) {
                     requestData.email = email;
+                }
+                
+                if (authSettings?.invite_code_required && inviteCode) {
+                    requestData.invite_code = inviteCode;
                 }
                 
                 const response = await fetch(`${API_BASE}/auth/register`, {
@@ -325,7 +388,9 @@
             }
         });
         
-        window.addEventListener('load', function() {
+        window.addEventListener('load', async function() {
+            await loadAuthSettings();
+            
             const token = localStorage.getItem('token');
             if (token) {
                 fetch(`${API_BASE}/auth/me`, {

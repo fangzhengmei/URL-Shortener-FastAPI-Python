@@ -2,6 +2,7 @@
 
 import secrets
 from functools import lru_cache
+from typing import Optional
 
 from pydantic import BaseSettings
 
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
 
+    allow_public_registration: bool = False
+    invite_code: Optional[str] = None
+    min_password_length: int = 6
+
     class Config:
         env_file = ".env"
         case_sensitive = False
@@ -24,4 +29,8 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings: Settings = Settings()
     print(f"Loading settings for: {settings.env_name}")
+    print(f"  - Public registration: {'Enabled' if settings.allow_public_registration else 'Disabled'}")
+    if settings.invite_code:
+        print(f"  - Invite code required: Yes")
+    print(f"  - Min password length: {settings.min_password_length}")
     return settings

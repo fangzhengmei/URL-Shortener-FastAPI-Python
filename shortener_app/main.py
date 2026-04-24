@@ -76,6 +76,15 @@ def check_url_ownership(db_url: models.URL, user: models.User):
         raise_forbidden()
 
 
+def check_registration_allowed(user: schemas.UserCreate, settings):
+    if settings.invite_code:
+        if not user.invite_code or user.invite_code.strip() != settings.invite_code:
+            raise_forbidden("Invalid or missing invite code.")
+    else:
+        if not settings.allow_public_registration:
+            raise_forbidden("Registration is disabled. Please contact the administrator.")
+
+
 @app.get("/")
 def read_root():
     return RedirectResponse(url="/login")
@@ -97,8 +106,22 @@ async def dashboard_page():
     return RedirectResponse(url="/docs")
 
 
+@app.get("/auth/settings", response_model=schemas.AuthSettings)
+def get_auth_settings():
+    settings = get_settings()
+    return schemas.AuthSettings(
+        allow_public_registration=settings.allow_public_registration,
+        invite_code_required=settings.invite_code is not None,
+        min_password_length=settings.min_password_length,
+    )
+
+
 @app.post("/auth/register", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    settings = get_settings()
+    
+    check_registration_allowed(user, settings, db)
+    
     existing_user = auth.get_user(db, username=user.username)
     if existing_user:
         raise HTTPException(
@@ -136,6 +159,13 @@ def login_for_access_token(
     
     access_token = auth.create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/auth/logout", response_model=schemas.LogoutResponse)
+def logout(
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    return schemas.LogoutResponse()
 
 
 @app.get("/auth/me", response_model=schemas.User)
@@ -243,6 +273,47 @@ def get_user_urls(
     return [get_url_list_item(url) for url in urls]
 
 
+@app.post("/admin/users", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
+def admin_create_user(
+    user_data: schemas.AdminUserCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    existing_user = auth.get_user(db, username=user_data.username)
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="Username already registered"
+        )
+    
+    if user_data.email:
+        existing_email = auth.get_user_by_email(db, email=user_data.email)
+        if existing_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email already registered"
+            )
+    
+    hashed_password = auth.get_password_hash(user_data.password)
+    db_user = models.User(
+        username=user_data.username,
+        email=user_data.email,
+        hashed_password=hashed_password,
+        is_active=True,
+        is_admin=user_data.is_admin,
+        created_at=datetime.utcnow()
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return db_user
+
+
 @app.get("/admin/users", response_model=List[schemas.User])
 def get_all_users(
     skip: int = 0,
@@ -269,10 +340,38 @@ def toggle_user_active(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    if user.is_admin:
-        raise_forbidden("Cannot modify admin users")
+    if user.is_admin and user.id != current_user.id:
+        user.is_active = not user.is_active
+    elif user.is_admin and user.id == current_user.id:
+        raise_forbidden("Cannot deactivate yourself")
+    else:
+        user.is_active = not user.is_active
     
-    user.is_active = not user.is_active
     db.commit()
     db.refresh(user)
+    return user
+
+
+@app.put("/admin/users/{user_id}/reset-password", response_model=schemas.User)
+def admin_reset_password(
+    user_id: int,
+    new_password: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    if not current_user.is_admin:
+        raise_forbidden("Admin access required")
+    
+    user = auth.get_user_by_id(db, user_id=user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    settings = get_settings()
+    if len(new_password) < settings.min_password_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {settings.min_password_length} characters"
+        )
+    
+    user = auth.update_user_password(db, user, new_password)
     return user
