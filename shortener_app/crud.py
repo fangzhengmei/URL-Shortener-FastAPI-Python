@@ -56,3 +56,17 @@ def deactivate_db_url_by_secret_key(
         db.commit()
         db.refresh(db_url)
     return db_url
+
+
+def get_all_urls_by_domain(db: Session, domain: str, include_inactive: bool = False):
+    query = db.query(models.URL).filter(models.URL.domain == domain)
+    if not include_inactive:
+        query = query.filter(models.URL.is_active)
+    return query.order_by(models.URL.id.desc()).all()
+
+
+def get_url_count_by_domain(db: Session, domain: str, include_inactive: bool = False):
+    query = db.query(models.URL).filter(models.URL.domain == domain)
+    if not include_inactive:
+        query = query.filter(models.URL.is_active)
+    return query.count()

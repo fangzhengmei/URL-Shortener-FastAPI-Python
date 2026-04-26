@@ -148,3 +148,73 @@ def delete_url(
         return {"detail": message}
     else:
         raise_not_found(request)
+
+
+def build_url_list_item(db_url: models.URL) -> schemas.URLListItem:
+    settings = get_settings()
+    
+    if db_url.domain and db_url.domain in settings.domains:
+        use_domain = db_url.domain
+    else:
+        base_url = URL(settings.base_url)
+        use_domain = base_url.netloc
+    
+    base_url_str = f"http://{use_domain}" if not use_domain.startswith("http") else use_domain
+    base_url = URL(base_url_str)
+    
+    admin_endpoint = app.url_path_for(
+        "administration info", secret_key=db_url.secret_key
+    )
+    
+    return schemas.URLListItem(
+        key=db_url.key,
+        target_url=db_url.target_url,
+        is_active=db_url.is_active,
+        clicks=db_url.clicks,
+        url=str(base_url.replace(path=f"/{db_url.key}")),
+        admin_url=str(base_url.replace(path=admin_endpoint))
+    )
+
+
+@app.get("/domains/{domain}/stats", response_model=schemas.DomainStats)
+def get_domain_stats(domain: str, db: Session = Depends(get_db)):
+    if not validate_domain(domain):
+        raise_bad_request(
+            message=f"Domain '{domain}' is not configured. Available domains: {get_settings().domains}"
+        )
+    
+    from sqlalchemy import func
+    from .models import URL
+    
+    total_urls = db.query(func.count(URL.id)).filter(URL.domain == domain).scalar()
+    active_urls = db.query(func.count(URL.id)).filter(URL.domain == domain, URL.is_active).scalar()
+    total_clicks = db.query(func.coalesce(func.sum(URL.clicks), 0)).filter(URL.domain == domain).scalar()
+    
+    return schemas.DomainStats(
+        domain=domain,
+        total_urls=total_urls,
+        active_urls=active_urls,
+        total_clicks=total_clicks
+    )
+
+
+@app.get("/domains/{domain}/urls", response_model=schemas.DomainURLList)
+def get_domain_urls(
+    domain: str,
+    include_inactive: bool = False,
+    db: Session = Depends(get_db)
+):
+    if not validate_domain(domain):
+        raise_bad_request(
+            message=f"Domain '{domain}' is not configured. Available domains: {get_settings().domains}"
+        )
+    
+    db_urls = crud.get_all_urls_by_domain(db, domain, include_inactive=include_inactive)
+    
+    url_list = [build_url_list_item(u) for u in db_urls]
+    
+    return schemas.DomainURLList(
+        domain=domain,
+        total=len(url_list),
+        urls=url_list
+    )

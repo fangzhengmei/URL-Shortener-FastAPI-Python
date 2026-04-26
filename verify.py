@@ -153,6 +153,83 @@ def run_tests():
     assert "127.0.0.1:8000" in info2.url
     print("✓ Passed\n")
     
+    print("="*50)
+    print("Test 8: Test get_all_urls_by_domain - list URLs by domain")
+    print("="*50)
+    
+    s_urls = crud.get_all_urls_by_domain(db, "s.example.com")
+    t_urls = crud.get_all_urls_by_domain(db, "t.example.com")
+    
+    print(f"Domain s.example.com has {len(s_urls)} URL(s)")
+    print(f"Domain t.example.com has {len(t_urls)} URL(s)")
+    
+    assert len(s_urls) == 1
+    assert len(t_urls) == 1
+    assert s_urls[0].domain == "s.example.com"
+    assert t_urls[0].domain == "t.example.com"
+    print("✓ Passed\n")
+    
+    print("="*50)
+    print("Test 9: Test get_url_count_by_domain - count URLs by domain")
+    print("="*50)
+    
+    s_count = crud.get_url_count_by_domain(db, "s.example.com")
+    t_count = crud.get_url_count_by_domain(db, "t.example.com")
+    
+    print(f"Domain s.example.com count: {s_count}")
+    print(f"Domain t.example.com count: {t_count}")
+    
+    assert s_count == 1
+    assert t_count == 1
+    print("✓ Passed\n")
+    
+    print("="*50)
+    print("Test 10: Test inactive URLs handling")
+    print("="*50)
+    
+    deactivated_secret = db_url1.secret_key
+    crud.deactivate_db_url_by_secret_key(db, deactivated_secret)
+    
+    s_urls_active = crud.get_all_urls_by_domain(db, "s.example.com", include_inactive=False)
+    s_urls_all = crud.get_all_urls_by_domain(db, "s.example.com", include_inactive=True)
+    s_count_active = crud.get_url_count_by_domain(db, "s.example.com", include_inactive=False)
+    s_count_all = crud.get_url_count_by_domain(db, "s.example.com", include_inactive=True)
+    
+    print(f"Active URLs in s.example.com: {len(s_urls_active)}")
+    print(f"All URLs in s.example.com: {len(s_urls_all)}")
+    print(f"Active count: {s_count_active}")
+    print(f"All count: {s_count_all}")
+    
+    assert len(s_urls_active) == 0
+    assert len(s_urls_all) == 1
+    assert s_count_active == 0
+    assert s_count_all == 1
+    print("✓ Passed\n")
+    
+    print("="*50)
+    print("Test 11: Test build_url_list_item helper with configured domain")
+    print("="*50)
+    
+    from shortener_app.main import build_url_list_item
+    
+    url_local2 = schemas.URLBase(
+        target_url="https://bing.com",
+        domain="127.0.0.1:8000"
+    )
+    db_url_local2 = crud.create_db_url(db, url_local2, domain="127.0.0.1:8000")
+    
+    list_item = build_url_list_item(db_url_local2)
+    print(f"List item key: {list_item.key}")
+    print(f"List item url: {list_item.url}")
+    print(f"List item admin_url: {list_item.admin_url}")
+    print(f"List item clicks: {list_item.clicks}")
+    
+    assert list_item.key == db_url_local2.key
+    assert "127.0.0.1:8000" in list_item.url
+    assert list_item.target_url == "https://bing.com"
+    assert list_item.is_active == True
+    print("✓ Passed\n")
+    
     db.close()
     print("="*50)
     print("All tests passed! ✓")
