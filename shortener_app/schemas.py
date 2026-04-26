@@ -1,12 +1,13 @@
 # schemas.py
 # Schema for request body and response body
 
-
+from typing import Optional
 from pydantic import BaseModel
 
 
 class URLBase(BaseModel):
     target_url: str
+    domain: Optional[str] = None
 
 
 class URL(URLBase):
