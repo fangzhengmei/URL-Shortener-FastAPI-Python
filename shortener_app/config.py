@@ -1,7 +1,7 @@
 # Configuration file
 
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseSettings, validator
 
@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     db_url: str = "sqlite:///./shortener.db"
     domains: List[str] = ["localhost:8000", "127.0.0.1:8000"]
+    admin_secret: Optional[str] = None
 
     @validator("domains", pre=True)
     def parse_domains(cls, v):
@@ -27,4 +28,8 @@ def get_settings() -> Settings:
     settings: Settings = Settings()
     print(f"Loading settings for: {settings.env_name}")
     print(f"Configured domains: {settings.domains}")
+    if settings.admin_secret:
+        print(f"Admin secret configured: {settings.admin_secret[:4]}***")
+    else:
+        print("Warning: No admin_secret configured, domain query endpoints will be disabled")
     return settings

@@ -1,10 +1,11 @@
 # main.py
 # FastAPI Implementation
 
-from typing import List
+from typing import List, Optional
 import validators
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Header, Query
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from starlette.datastructures import URL
 from . import crud, models, schemas
@@ -21,6 +22,34 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def raise_forbidden(message: str):
+    raise HTTPException(status_code=403, detail=message)
+
+
+def verify_admin_secret(
+    x_admin_secret: Optional[str] = Header(None),
+    admin_secret: Optional[str] = Query(None),
+) -> bool:
+    settings = get_settings()
+    
+    if not settings.admin_secret:
+        raise_forbidden(
+            "Admin access not configured. Please set ADMIN_SECRET in environment."
+        )
+    
+    provided_secret = x_admin_secret or admin_secret
+    
+    if not provided_secret:
+        raise_forbidden(
+            "Admin secret required. Provide via X-Admin-Secret header or admin_secret query parameter."
+        )
+    
+    if provided_secret != settings.admin_secret:
+        raise_forbidden("Invalid admin secret.")
+    
+    return True
 
 
 def get_request_domain(request: Request) -> str:
@@ -177,7 +206,11 @@ def build_url_list_item(db_url: models.URL) -> schemas.URLListItem:
 
 
 @app.get("/domains/{domain}/stats", response_model=schemas.DomainStats)
-def get_domain_stats(domain: str, db: Session = Depends(get_db)):
+def get_domain_stats(
+    domain: str, 
+    db: Session = Depends(get_db),
+    is_admin: bool = Depends(verify_admin_secret)
+):
     if not validate_domain(domain):
         raise_bad_request(
             message=f"Domain '{domain}' is not configured. Available domains: {get_settings().domains}"
@@ -202,7 +235,8 @@ def get_domain_stats(domain: str, db: Session = Depends(get_db)):
 def get_domain_urls(
     domain: str,
     include_inactive: bool = False,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    is_admin: bool = Depends(verify_admin_secret)
 ):
     if not validate_domain(domain):
         raise_bad_request(
